@@ -1,0 +1,26 @@
+{
+	"geode": "4.0.0",
+	"gd": "*",
+	"id": "user.early-click-buffer",
+	"name": "Early Click Buffer",
+	"version": "v1.0.0",
+	"developer": "user",
+	"description": "Registers clicks made up to 20 frames early and shows how many frames it saved you.",
+	"settings": {
+		"window-frames": {
+			"type": "int",
+			"name": "Buffer Window (frames)",
+			"description": "How many frames early a click can be and still register. 0 = off, max 20.",
+			"default": 10,
+			"min": 0,
+			"max": 20,
+			"control": { "slider": true, "arrows": true, "input": true }
+		},
+		"show-indicator": {
+			"type": "bool",
+			"name": "Show Saved Frames",
+			"description": "Shows how many frames the mod saved you on each buffered click.",
+			"default": true
+		}
+	}
+}
