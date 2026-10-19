@@ -8,9 +8,12 @@
 using namespace geode::prelude;
 
 static constexpr int SAVED_LABEL_TAG = 0x5AFE;
-static constexpr float SIM_DT = 1.f / 240.f;
-static constexpr float HORIZON = 0.30f;      // seconds simulated ahead
-static constexpr float MIN_GAIN = 0.0125f;   // must survive 3+ ticks longer to change anything
+
+// All times below are in "frames" (1 frame = 1/60 s).
+// PlayerObject::update's dt is expressed in these units.
+static constexpr float STEP = 0.25f;     // simulation step (frames)
+static constexpr float TAIL = 14.f;      // frames simulated after the buffer window
+static constexpr float MIN_GAIN = 0.75f; // must survive 3+ steps longer to change a click
 
 struct Obst { float l, r, b, t; bool solid; };
 struct Ev { float time; bool hold; };
@@ -76,22 +79,22 @@ static void rebuildCache(PlayLayer* pl, float from, float to) {
 	g_cacheValid = true;
 }
 
-// Returns how many seconds (up to horizon) the wave survives.
+// vx = pixels per frame, up/down = dy/dx slopes. Returns frames survived (up to horizon).
 static float simulate(float x, float y, float vx, float up, float down, float half,
                       bool startHold, const std::vector<Ev>& evs,
                       const std::vector<Obst>& obs, float horizon) {
 	bool hold = startHold;
 	size_t ei = 0;
 	float t = 0.f;
-	int steps = static_cast<int>(horizon / SIM_DT);
+	int steps = static_cast<int>(horizon / STEP);
 	for (int i = 0; i < steps; i++) {
-		while (ei < evs.size() && evs[ei].time <= t + 1e-6f) {
+		while (ei < evs.size() && evs[ei].time <= t + 1e-4f) {
 			hold = evs[ei].hold;
 			ei++;
 		}
 		float slope = hold ? up : down;
-		float nx = x + vx * SIM_DT;
-		float ny = y + slope * vx * SIM_DT;
+		float nx = x + vx * STEP;
+		float ny = y + slope * vx * STEP;
 		for (auto const& o : obs) {
 			if (o.r < nx - half || o.l > nx + half) continue;
 			bool ovNew = !(o.t < ny - half || o.b > ny + half);
@@ -103,7 +106,7 @@ static float simulate(float x, float y, float vx, float up, float down, float ha
 		}
 		x = nx;
 		y = ny;
-		t += SIM_DT;
+		t += STEP;
 	}
 	return horizon;
 }
@@ -113,8 +116,7 @@ class $modify(BufferPlayer, PlayerObject) {
 		// wave
 		std::deque<PendEv> queue;
 		bool appliedHold = false;
-		float upSlope = 1.f;
-		float downSlope = -1.f;
+		float slopeMag = 1.f;
 		float vx = 0.f;
 		bool haveVx = false;
 		// ground
@@ -166,33 +168,41 @@ class $modify(BufferPlayer, PlayerObject) {
 		}
 	}
 
+	bool passThrough(bool hold) {
+		m_fields->appliedHold = hold;
+		return hold ? PlayerObject::pushButton(PlayerButton::Jump)
+		            : PlayerObject::releaseButton(PlayerButton::Jump);
+	}
+
 	bool handleWaveEvent(bool hold) {
 		auto f = m_fields.self();
 		float last = f->queue.empty() ? 0.f : f->queue.back().remaining;
 		bool lastHold = f->queue.empty() ? f->appliedHold : f->queue.back().hold;
 
-		// duplicate state: nothing to decide
+		// same state as before: nothing to decide
 		if (hold == lastHold) {
-			if (f->queue.empty()) {
-				f->appliedHold = hold;
-				return hold ? PlayerObject::pushButton(PlayerButton::Jump)
-				            : PlayerObject::releaseButton(PlayerButton::Jump);
-			}
+			if (f->queue.empty()) return passThrough(hold);
 			f->queue.push_back({last, hold});
 			return true;
 		}
 
 		auto pl = PlayLayer::get();
-		float maxA = static_cast<float>(windowFrames()) / 60.f;
+		float maxA = static_cast<float>(windowFrames());
+		float horizon = std::min(maxA + TAIL, 40.f);
 		float px = this->getPositionX();
 		float py = this->getPositionY();
-		float span = f->vx * (HORIZON + maxA);
+		float span = f->vx * horizon;
 
 		if (!g_cacheValid || px - 40.f < g_cacheMin || px + span + 80.f > g_cacheMax) {
 			rebuildCache(pl, px - 100.f, px + std::max(span + 80.f, 1500.f));
 		}
 
-		float reach = std::max(std::fabs(f->upSlope), std::fabs(f->downSlope)) * span + 40.f;
+		float mag = f->slopeMag;
+		float dir = m_isUpsideDown ? -1.f : 1.f;
+		float up = mag * dir;
+		float down = -mag * dir;
+
+		float reach = mag * span + 40.f;
 		std::vector<Obst> local;
 		for (auto const& o : g_cache) {
 			if (o.r >= px - 30.f && o.l <= px + span + 40.f &&
@@ -207,8 +217,8 @@ class $modify(BufferPlayer, PlayerObject) {
 		std::vector<Ev> base;
 		for (auto const& e : f->queue) base.push_back({e.remaining, e.hold});
 
-		int kmin = static_cast<int>(std::ceil(last / SIM_DT - 1e-4f));
-		int kmax = static_cast<int>(std::floor(maxA / SIM_DT + 1e-4f));
+		int kmin = static_cast<int>(std::ceil(last / STEP - 1e-4f));
+		int kmax = static_cast<int>(std::floor(maxA / STEP + 1e-4f));
 		if (kmin < 0) kmin = 0;
 		if (kmax < kmin) kmax = kmin;
 
@@ -216,9 +226,9 @@ class $modify(BufferPlayer, PlayerObject) {
 		float Tmax = -1.f;
 		for (int k = kmin; k <= kmax; k++) {
 			auto evs = base;
-			evs.push_back({k * SIM_DT, hold});
-			float t = simulate(px, py, f->vx, f->upSlope, f->downSlope, half,
-			                   f->appliedHold, evs, local, HORIZON);
+			evs.push_back({k * STEP, hold});
+			float t = simulate(px, py, f->vx, up, down, half,
+			                   f->appliedHold, evs, local, horizon);
 			T[k - kmin] = t;
 			if (t > Tmax) Tmax = t;
 		}
@@ -226,24 +236,20 @@ class $modify(BufferPlayer, PlayerObject) {
 		int chosen = kmin;
 		if (Tmax > T[0] + MIN_GAIN) {
 			for (int k = kmin; k <= kmax; k++) {
-				if (T[k - kmin] >= Tmax - 1e-5f) { chosen = k; break; }
+				if (T[k - kmin] >= Tmax - 1e-4f) { chosen = k; break; }
 			}
 		}
 
-		float a = chosen * SIM_DT;
-		int frames = static_cast<int>(std::lround(a * 60.f));
+		float a = chosen * STEP;
+		int frames = static_cast<int>(std::lround(a));
 
-		if (dbg()) {
-			log::info("wave {} | obstacles={} | survive(no delay)={:.3f}s best={:.3f}s | delay={}f | up={:.2f} down={:.2f} vx={:.1f}",
-				hold ? "PRESS" : "RELEASE", local.size(), T[0], Tmax, frames,
-				f->upSlope, f->downSlope, f->vx);
+		if (dbg() && (T[0] < horizon - 1e-3f || chosen > kmin)) {
+			log::info("wave {} | obstacles={} | survive(no delay)={:.2f}f best={:.2f}f of {:.0f}f | delay={:.2f}f | slope={:.0f} vx={:.2f}px/f",
+				hold ? "PRESS" : "RELEASE", local.size(), T[0], Tmax, horizon, a,
+				mag, f->vx);
 		}
 
-		if (a <= 1e-6f && f->queue.empty()) {
-			f->appliedHold = hold;
-			return hold ? PlayerObject::pushButton(PlayerButton::Jump)
-			            : PlayerObject::releaseButton(PlayerButton::Jump);
-		}
+		if (a <= 1e-6f && f->queue.empty()) return passThrough(hold);
 
 		f->queue.push_back({a, hold});
 		if (frames > 0) showSaved(frames);
@@ -286,13 +292,13 @@ class $modify(BufferPlayer, PlayerObject) {
 	void update(float dt) {
 		auto f = m_fields.self();
 
-		// --- wave: apply delayed events ---
+		// --- wave: apply delayed events (dt is in frames) ---
 		if (!f->queue.empty()) {
 			if (!(PlayLayer::get() && m_isDart)) {
 				flushQueue();
 			} else {
 				for (auto& e : f->queue) e.remaining -= dt;
-				while (!f->queue.empty() && f->queue.front().remaining <= 1e-6f) {
+				while (!f->queue.empty() && f->queue.front().remaining <= 1e-4f) {
 					bool h = f->queue.front().hold;
 					f->queue.pop_front();
 					applyEvent(h);
@@ -313,11 +319,11 @@ class $modify(BufferPlayer, PlayerObject) {
 				clearGround();
 			} else {
 				f->age += dt;
-				float limit = static_cast<float>(windowFrames()) / 60.f;
-				if (f->age > limit + 0.0001f) {
+				float limit = static_cast<float>(windowFrames());
+				if (f->age > limit + 0.001f) {
 					f->pending = false;
 				} else if (canAct()) {
-					int saved = static_cast<int>(std::lround(f->age * 60.f));
+					int saved = static_cast<int>(std::lround(f->age));
 					f->pending = false;
 					bool vanillaHandles = f->userDown && m_isOnGround && m_touchedRings.empty();
 					if (!vanillaHandles) {
@@ -336,20 +342,16 @@ class $modify(BufferPlayer, PlayerObject) {
 
 		PlayerObject::update(dt);
 
-		// --- wave: learn real speed and slopes ---
-		if (m_isDart && dt > 0.00001f) {
+		// --- wave: learn real speed (px/frame) and slope magnitude ---
+		if (m_isDart && dt > 1e-5f) {
 			float ddx = this->getPositionX() - px;
 			float ddy = this->getPositionY() - py;
-			if (ddx > 0.01f && ddx < 50.f) {
-				float v = ddx / dt;
-				float s = ddy / ddx;
-				if (v > 1.f) {
-					f->vx = v;
-					f->haveVx = true;
-				}
-				if (std::fabs(s) > 0.5f && std::fabs(s) < 4.f) {
-					if (f->appliedHold) f->upSlope = s;
-					else f->downSlope = s;
+			if (ddx > 0.001f && ddx < 60.f) {
+				f->vx = ddx / dt;
+				f->haveVx = true;
+				float s = std::fabs(ddy / ddx);
+				if (s > 0.9f && s < 3.f) {
+					f->slopeMag = (s > 1.5f) ? 2.f : 1.f;
 				}
 			}
 		}
