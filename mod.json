@@ -8,23 +8,41 @@
 	},
 	"id": "user.early-click-buffer",
 	"name": "Early Click Buffer",
-	"version": "v1.0.0",
+	"version": "v1.1.0",
 	"developer": "user",
-	"description": "Registers clicks made up to 20 frames early and shows how many frames it saved you.",
+	"description": "Predicts wave collisions and delays your clicks by up to 20 frames so you survive. Shows how many frames it saved.",
 	"settings": {
 		"window-frames": {
 			"type": "int",
 			"name": "Buffer Window (frames)",
-			"description": "How many frames early a click can be and still register. 0 = off, max 20.",
-			"default": 10,
+			"description": "Maximum frames a click can be delayed/buffered. 0 = off, max 20 (60 fps equivalent).",
+			"default": 20,
 			"min": 0,
 			"max": 20,
 			"control": { "slider": true, "arrows": true, "input": true }
 		},
+		"wave-assist": {
+			"type": "bool",
+			"name": "Wave Assist",
+			"description": "Simulates the wave ahead and delays clicks that would make you crash.",
+			"default": true
+		},
+		"ground-assist": {
+			"type": "bool",
+			"name": "Cube/Ball/Robot/Spider Assist",
+			"description": "Buffers early clicks until you can jump or touch an orb.",
+			"default": true
+		},
 		"show-indicator": {
 			"type": "bool",
 			"name": "Show Saved Frames",
-			"description": "Shows how many frames the mod saved you on each buffered click.",
+			"description": "Shows how many frames the mod saved you.",
+			"default": true
+		},
+		"debug-log": {
+			"type": "bool",
+			"name": "Debug Log",
+			"description": "Writes decisions to the Geode log (useful for bug reports).",
 			"default": true
 		}
 	}
