@@ -1,6 +1,11 @@
 {
-	"geode": "4.0.0",
-	"gd": "*",
+	"geode": "5.11.2",
+	"gd": {
+		"win": "2.2081",
+		"android": "2.2081",
+		"mac": "2.2081",
+		"ios": "2.2081"
+	},
 	"id": "user.early-click-buffer",
 	"name": "Early Click Buffer",
 	"version": "v1.0.0",
