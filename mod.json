@@ -8,41 +8,44 @@
 	},
 	"id": "user.early-click-buffer",
 	"name": "Early Click Buffer",
-	"version": "v1.1.0",
+	"version": "v1.2.0",
 	"developer": "user",
-	"description": "Predicts wave collisions and delays your clicks by up to 20 frames so you survive. Shows how many frames it saved.",
+	"description": "Predicts wave collisions and delays presses/releases by a few ticks so you survive. Shows how many ticks it saved.",
 	"settings": {
-		"window-frames": {
+		"window-ticks": {
 			"type": "int",
-			"name": "Buffer Window (frames)",
-			"description": "Maximum frames a click can be delayed/buffered. 0 = off, max 20 (60 fps equivalent).",
-			"default": 20,
+			"name": "Buffer Window (ticks)",
+			"description": "Maximum delay applied to a click or release. 1 tick = 1/240 s (4 ticks = 1 frame at 60 fps). 0 = off, max 64 (16 frames).",
+			"default": 16,
 			"min": 0,
-			"max": 20,
+			"max": 64,
+			"control": { "slider": true, "arrows": true, "input": true }
+		},
+		"danger-ticks": {
+			"type": "int",
+			"name": "Danger Window (ticks)",
+			"description": "A click is only corrected if you would crash within this many ticks. Lower = fewer corrections, higher = more.",
+			"default": 12,
+			"min": 2,
+			"max": 32,
 			"control": { "slider": true, "arrows": true, "input": true }
 		},
 		"wave-assist": {
 			"type": "bool",
 			"name": "Wave Assist",
-			"description": "Simulates the wave ahead and delays clicks that would make you crash.",
-			"default": true
-		},
-		"ground-assist": {
-			"type": "bool",
-			"name": "Cube/Ball/Robot/Spider Assist",
-			"description": "Buffers early clicks until you can jump or touch an orb.",
+			"description": "Simulates the wave ahead and delays presses/releases that would make you crash.",
 			"default": true
 		},
 		"show-indicator": {
 			"type": "bool",
-			"name": "Show Saved Frames",
-			"description": "Shows how many frames the mod saved you.",
+			"name": "Show Saved Ticks",
+			"description": "Shows how many ticks the mod saved you.",
 			"default": true
 		},
 		"debug-log": {
 			"type": "bool",
 			"name": "Debug Log",
-			"description": "Writes decisions to the Geode log (useful for bug reports).",
+			"description": "Writes each correction to the Geode log.",
 			"default": true
 		}
 	}
