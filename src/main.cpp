@@ -10,14 +10,21 @@ using namespace geode::prelude;
 static constexpr int SAVED_LABEL_TAG = 0x5AFE;
 
 // All times below are in "frames" (1 frame = 1/60 s).
-// PlayerObject::update's dt is expressed in these units.
 static constexpr float STEP = 0.25f;     // simulation step (frames)
 static constexpr float TAIL = 14.f;      // frames simulated after the buffer window
 static constexpr float MIN_GAIN = 0.75f; // must survive 3+ steps longer to change a click
+static constexpr int MAX_EVENTS_PER_TICK = 6;
 
 struct Obst { float l, r, b, t; bool solid; };
 struct Ev { float time; bool hold; };
 struct PendEv { float remaining; bool hold; };
+
+// Sets a flag while we call into the game's original button code.
+struct ReGuard {
+	bool& flag;
+	explicit ReGuard(bool& f) : flag(f) { flag = true; }
+	~ReGuard() { flag = false; }
+};
 
 static std::vector<Obst> g_cache;
 static float g_cacheMin = 0.f, g_cacheMax = 0.f;
@@ -113,6 +120,9 @@ static float simulate(float x, float y, float vx, float up, float down, float ha
 
 class $modify(BufferPlayer, PlayerObject) {
 	struct Fields {
+		// shared
+		bool inside = false;        // true while we are calling the game's original code
+		int eventsThisTick = 0;
 		// wave
 		std::deque<PendEv> queue;
 		bool appliedHold = false;
@@ -125,6 +135,19 @@ class $modify(BufferPlayer, PlayerObject) {
 		bool releaseNext = false;
 		float age = 0.f;
 	};
+
+	// ---------- calls into the game's original code (re-entrancy safe) ----------
+	bool origPush() {
+		auto f = m_fields.self();
+		ReGuard g(f->inside);
+		return PlayerObject::pushButton(PlayerButton::Jump);
+	}
+
+	bool origRelease() {
+		auto f = m_fields.self();
+		ReGuard g(f->inside);
+		return PlayerObject::releaseButton(PlayerButton::Jump);
+	}
 
 	// ---------- helpers ----------
 	bool waveAssistActive() {
@@ -155,8 +178,8 @@ class $modify(BufferPlayer, PlayerObject) {
 
 	void applyEvent(bool hold) {
 		m_fields->appliedHold = hold;
-		if (hold) PlayerObject::pushButton(PlayerButton::Jump);
-		else PlayerObject::releaseButton(PlayerButton::Jump);
+		if (hold) origPush();
+		else origRelease();
 	}
 
 	void flushQueue() {
@@ -170,12 +193,15 @@ class $modify(BufferPlayer, PlayerObject) {
 
 	bool passThrough(bool hold) {
 		m_fields->appliedHold = hold;
-		return hold ? PlayerObject::pushButton(PlayerButton::Jump)
-		            : PlayerObject::releaseButton(PlayerButton::Jump);
+		return hold ? origPush() : origRelease();
 	}
 
 	bool handleWaveEvent(bool hold) {
 		auto f = m_fields.self();
+
+		// safety: never process a runaway number of events in the same tick
+		if (++f->eventsThisTick > MAX_EVENTS_PER_TICK) return passThrough(hold);
+
 		float last = f->queue.empty() ? 0.f : f->queue.back().remaining;
 		bool lastHold = f->queue.empty() ? f->appliedHold : f->queue.back().hold;
 
@@ -243,10 +269,9 @@ class $modify(BufferPlayer, PlayerObject) {
 		float a = chosen * STEP;
 		int frames = static_cast<int>(std::lround(a));
 
-		if (dbg() && (T[0] < horizon - 1e-3f || chosen > kmin)) {
-			log::info("wave {} | obstacles={} | survive(no delay)={:.2f}f best={:.2f}f of {:.0f}f | delay={:.2f}f | slope={:.0f} vx={:.2f}px/f",
-				hold ? "PRESS" : "RELEASE", local.size(), T[0], Tmax, horizon, a,
-				mag, f->vx);
+		if (dbg() && chosen > kmin) {
+			log::info("wave {} delayed {:.2f}f | survive(no delay)={:.2f}f best={:.2f}f of {:.0f}f | obstacles={}",
+				hold ? "PRESS" : "RELEASE", a, T[0], Tmax, horizon, local.size());
 		}
 
 		if (a <= 1e-6f && f->queue.empty()) return passThrough(hold);
@@ -258,9 +283,10 @@ class $modify(BufferPlayer, PlayerObject) {
 
 	// ---------- hooks ----------
 	bool pushButton(PlayerButton button) {
-		if (button != PlayerButton::Jump) return PlayerObject::pushButton(button);
-
 		auto f = m_fields.self();
+		// re-entrant call (another mod / the game calling us back): do not touch it
+		if (f->inside || button != PlayerButton::Jump) return PlayerObject::pushButton(button);
+
 		f->userDown = true;
 
 		if (waveAssistActive()) return handleWaveEvent(true);
@@ -274,23 +300,24 @@ class $modify(BufferPlayer, PlayerObject) {
 			f->pending = true;
 			if (dbg()) log::info("ground: early click stored");
 		}
-		return PlayerObject::pushButton(button);
+		return origPush();
 	}
 
 	bool releaseButton(PlayerButton button) {
-		if (button != PlayerButton::Jump) return PlayerObject::releaseButton(button);
-
 		auto f = m_fields.self();
+		if (f->inside || button != PlayerButton::Jump) return PlayerObject::releaseButton(button);
+
 		f->userDown = false;
 
 		if (waveAssistActive()) return handleWaveEvent(false);
 
 		f->appliedHold = false;
-		return PlayerObject::releaseButton(button);
+		return origRelease();
 	}
 
 	void update(float dt) {
 		auto f = m_fields.self();
+		if (dt > 1e-5f) f->eventsThisTick = 0;
 
 		// --- wave: apply delayed events (dt is in frames) ---
 		if (!f->queue.empty()) {
@@ -311,7 +338,7 @@ class $modify(BufferPlayer, PlayerObject) {
 			f->releaseNext = false;
 			if (!f->userDown) {
 				f->appliedHold = false;
-				PlayerObject::releaseButton(PlayerButton::Jump);
+				origRelease();
 			}
 		}
 		if (f->pending) {
@@ -328,7 +355,7 @@ class $modify(BufferPlayer, PlayerObject) {
 					bool vanillaHandles = f->userDown && m_isOnGround && m_touchedRings.empty();
 					if (!vanillaHandles) {
 						f->appliedHold = true;
-						PlayerObject::pushButton(PlayerButton::Jump);
+						origPush();
 						if (!f->userDown) f->releaseNext = true;
 					}
 					if (dbg()) log::info("ground: applied early click, saved {} frames", saved);
@@ -363,6 +390,8 @@ class $modify(BufferPlayer, PlayerObject) {
 		f->queue.clear();
 		f->appliedHold = false;
 		f->userDown = false;
+		f->inside = false;
+		f->eventsThisTick = 0;
 		clearGround();
 		g_cacheValid = false;
 	}
