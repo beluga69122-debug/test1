@@ -12,6 +12,9 @@ static constexpr int SAVED_LABEL_TAG = 0x5AFE;
 // Times are in "frames" (1 frame = 1/60 s). One physics tick at 240 TPS = 0.25 frames.
 static constexpr float TICK = 0.25f;
 static constexpr int MAX_EVENTS_PER_TICK = 6;
+static constexpr int SETTLE_TICKS = 6;
+static constexpr int MISMATCH_LIMIT = 4;
+static constexpr int MAX_RESYNCS = 4;
 
 struct Obst { float l, r, b, t; bool solid; };
 struct Ev { float time; bool hold; };
@@ -26,6 +29,8 @@ struct ReGuard {
 static std::vector<Obst> g_cache;
 static float g_cacheMin = 0.f, g_cacheMax = 0.f;
 static bool g_cacheValid = false;
+static int g_diagLogged = 0;
+static int g_rectLogged = 0;
 
 static int windowTicks() {
 	auto v = Mod::get()->getSettingValue<int64_t>("window-ticks");
@@ -37,6 +42,13 @@ static int windowTicks() {
 static int dangerTicks() {
 	auto v = Mod::get()->getSettingValue<int64_t>("danger-ticks");
 	if (v < 2) v = 2;
+	if (v > 16) v = 16;
+	return static_cast<int>(v);
+}
+
+static int minGainTicks() {
+	auto v = Mod::get()->getSettingValue<int64_t>("min-gain-ticks");
+	if (v < 1) v = 1;
 	if (v > 16) v = 16;
 	return static_cast<int>(v);
 }
@@ -84,6 +96,12 @@ static void rebuildCache(PlayLayer* pl, float from, float to) {
 			r.origin.y, r.origin.y + r.size.height,
 			solid
 		});
+		if (haz && g_diagLogged < 6 && dbg()) {
+			g_diagLogged++;
+			log::info("diag hazard id={} rect {:.1f}x{:.1f} at ({:.0f},{:.0f}) rot={:.0f}",
+				obj->m_objectID, r.size.width, r.size.height,
+				r.origin.x, r.origin.y, obj->getRotation());
+		}
 	}
 	g_cacheMin = from;
 	g_cacheMax = to;
@@ -128,7 +146,10 @@ class $modify(BufferPlayer, PlayerObject) {
 		int eventsThisTick = 0;
 		std::deque<PendEv> queue;
 		int lastShift = 0;          // delay (ticks) given to the most recent queued event
-		bool appliedHold = false;
+		bool appliedHold = false;   // what we believe the game currently has
+		int settle = 0;             // ticks since the last applied event
+		int mismatch = 0;
+		int resyncs = 0;
 		float slopeMag = 1.f;
 		float vx = 0.f;
 		bool haveVx = false;
@@ -153,7 +174,9 @@ class $modify(BufferPlayer, PlayerObject) {
 	}
 
 	void applyEvent(bool hold) {
-		m_fields->appliedHold = hold;
+		auto f = m_fields.self();
+		f->appliedHold = hold;
+		f->settle = SETTLE_TICKS;
 		if (hold) origPush();
 		else origRelease();
 	}
@@ -169,8 +192,10 @@ class $modify(BufferPlayer, PlayerObject) {
 	}
 
 	bool passThrough(bool hold) {
-		m_fields->appliedHold = hold;
-		m_fields->lastShift = 0;
+		auto f = m_fields.self();
+		f->appliedHold = hold;
+		f->settle = SETTLE_TICKS;
+		f->lastShift = 0;
 		return hold ? origPush() : origRelease();
 	}
 
@@ -193,6 +218,7 @@ class $modify(BufferPlayer, PlayerObject) {
 		auto pl = PlayLayer::get();
 		float maxA = windowTicks() * TICK;
 		float need = dangerTicks() * TICK;
+		float gain = minGainTicks() * TICK;
 		float horizon = maxA + need + 3.f;
 		float px = this->getPositionX();
 		float py = this->getPositionY();
@@ -218,6 +244,13 @@ class $modify(BufferPlayer, PlayerObject) {
 
 		float scale = std::clamp(std::fabs(this->getScaleX()), 0.3f, 1.2f);
 		float half = 5.f * scale;
+
+		if (dbg() && g_rectLogged < 3) {
+			g_rectLogged++;
+			CCRect pr = this->getObjectRect();
+			log::info("diag player rect {:.1f}x{:.1f} scale={:.2f} slope={:.0f} vx={:.2f}px/f",
+				pr.size.width, pr.size.height, this->getScaleX(), mag, f->vx);
+		}
 
 		std::vector<Ev> base;
 		for (auto const& e : f->queue) base.push_back({e.remaining, e.hold});
@@ -245,29 +278,35 @@ class $modify(BufferPlayer, PlayerObject) {
 			return t - k;
 		};
 
+		float refPost = post(i0);
+		float best = refPost;
+		for (int i = 0; i < n; i++) best = std::max(best, post(i));
+
 		int bi = i0;
-		if (post(i0) < need - 1e-4f) {
+		// only act if the original click is in danger AND a delay is clearly better
+		if (refPost < need - 1e-4f && best >= refPost + gain - 1e-4f) {
+			float target = std::min(need, best) - TICK;
 			int found = -1;
 			for (int d = 1; d < n && found < 0; d++) {
 				int lo = i0 - d;
 				int hi = i0 + d;
-				if (lo >= 0 && post(lo) >= need - 1e-4f) found = lo;
-				else if (hi < n && post(hi) >= need - 1e-4f) found = hi;
+				if (lo >= 0 && post(lo) >= target) found = lo;
+				else if (hi < n && post(hi) >= target) found = hi;
 			}
 			if (found >= 0) {
 				bi = found;
 				// 1 tick of margin for hitbox estimation errors
-				if (found > i0 && found + 1 < n && post(found + 1) >= need - 1e-4f) bi = found + 1;
+				if (found > i0 && found + 1 < n && post(found + 1) >= target) bi = found + 1;
 			}
 		}
 
 		int chosen = kmin + bi;
 		f->lastShift = chosen;
 
-		if (dbg() && (chosen != k0 || chosen > 0)) {
-			log::info("wave {} delayed {} ticks ({:.2f}f) | reference={} | after-click survival: reference {:.2f}f, chosen {:.2f}f | obstacles={}",
+		if (dbg() && chosen != k0) {
+			log::info("wave {} delayed {} ticks ({:.2f}f) | reference={} | after-click survival: reference {:.2f}f, best {:.2f}f, chosen {:.2f}f | obstacles={}",
 				hold ? "PRESS" : "RELEASE", chosen, chosen * TICK, k0,
-				post(i0), post(bi), local.size());
+				refPost, best, post(bi), local.size());
 		}
 
 		if (chosen == 0 && f->queue.empty()) return passThrough(hold);
@@ -284,6 +323,7 @@ class $modify(BufferPlayer, PlayerObject) {
 		if (waveAssistActive()) return handleWaveEvent(true);
 
 		f->appliedHold = true;
+		f->settle = SETTLE_TICKS;
 		return origPush();
 	}
 
@@ -294,6 +334,7 @@ class $modify(BufferPlayer, PlayerObject) {
 		if (waveAssistActive()) return handleWaveEvent(false);
 
 		f->appliedHold = false;
+		f->settle = SETTLE_TICKS;
 		return origRelease();
 	}
 
@@ -322,16 +363,36 @@ class $modify(BufferPlayer, PlayerObject) {
 		// time passes for the remaining queued events
 		for (auto& e : f->queue) e.remaining -= dt;
 
-		// learn the wave's real speed (px/frame) and slope (1 normal, 2 mini)
+		if (f->settle > 0) f->settle--;
+
+		// learn the wave's real speed (px/frame) and slope (1 normal, 2 mini),
+		// and check that our idea of "holding" matches the real movement
 		if (m_isDart && dt > 1e-5f) {
 			float ddx = this->getPositionX() - px;
 			float ddy = this->getPositionY() - py;
 			if (ddx > 0.001f && ddx < 60.f) {
 				f->vx = ddx / dt;
 				f->haveVx = true;
-				float s = std::fabs(ddy / ddx);
-				if (s > 0.9f && s < 3.f) {
-					f->slopeMag = (s > 1.5f) ? 2.f : 1.f;
+				float s = ddy / ddx;
+				float sa = std::fabs(s);
+				if (sa > 0.9f && sa < 3.f) {
+					f->slopeMag = (sa > 1.5f) ? 2.f : 1.f;
+
+					int upSign = m_isUpsideDown ? -1 : 1;
+					int dirNow = s > 0.f ? 1 : -1;
+					bool obsHold = (dirNow == upSign);
+					if (f->settle == 0 && f->queue.empty()) {
+						if (obsHold != f->appliedHold) {
+							if (++f->mismatch >= MISMATCH_LIMIT && f->resyncs < MAX_RESYNCS) {
+								f->appliedHold = obsHold;
+								f->mismatch = 0;
+								f->resyncs++;
+								if (dbg()) log::info("resync: hold state corrected to {}", obsHold ? "held" : "released");
+							}
+						} else {
+							f->mismatch = 0;
+						}
+					}
 				}
 			}
 		}
@@ -343,6 +404,9 @@ class $modify(BufferPlayer, PlayerObject) {
 		f->queue.clear();
 		f->lastShift = 0;
 		f->appliedHold = false;
+		f->settle = 0;
+		f->mismatch = 0;
+		f->resyncs = 0;
 		f->inside = false;
 		f->eventsThisTick = 0;
 		g_cacheValid = false;
