@@ -8,14 +8,14 @@
 	},
 	"id": "user.early-click-buffer",
 	"name": "Early Click Buffer",
-	"version": "v1.2.1",
+	"version": "v1.3.0",
 	"developer": "user",
 	"description": "Predicts wave collisions and delays presses/releases by a few ticks so you survive. Shows how many ticks it saved.",
 	"settings": {
 		"window-ticks": {
 			"type": "int",
 			"name": "Buffer Window (ticks)",
-			"description": "Maximum delay applied to a click or release. 1 tick = 1/240 s (4 ticks = 1 frame at 60 fps). 0 = off, max 64 (16 frames). Recommended: 16.",
+			"description": "Maximum delay applied to a click or release. 1 tick = 1/240 s (4 ticks = 1 frame at 60 fps). 0 = off, max 64. Recommended: 16.",
 			"default": 16,
 			"min": 0,
 			"max": 64,
@@ -24,9 +24,18 @@
 		"danger-ticks": {
 			"type": "int",
 			"name": "Danger Window (ticks)",
-			"description": "A click is only corrected if you would crash within this many ticks. Lower = fewer corrections, higher = more. Recommended: 12.",
-			"default": 12,
+			"description": "A click is only considered for correction if you would crash within this many ticks after it. Lower = fewer corrections. Recommended: 8.",
+			"default": 8,
 			"min": 2,
+			"max": 16,
+			"control": { "slider": true, "arrows": true, "input": true }
+		},
+		"min-gain-ticks": {
+			"type": "int",
+			"name": "Minimum Improvement (ticks)",
+			"description": "A delay is only applied if it makes you survive at least this many ticks longer than your original click. Higher = safer, fewer corrections. Recommended: 3.",
+			"default": 3,
+			"min": 1,
 			"max": 16,
 			"control": { "slider": true, "arrows": true, "input": true }
 		},
@@ -45,7 +54,7 @@
 		"debug-log": {
 			"type": "bool",
 			"name": "Debug Log",
-			"description": "Writes each correction to the Geode log.",
+			"description": "Writes corrections and diagnostics to the Geode log.",
 			"default": true
 		}
 	}
