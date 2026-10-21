@@ -37,7 +37,7 @@ static int windowTicks() {
 static int dangerTicks() {
 	auto v = Mod::get()->getSettingValue<int64_t>("danger-ticks");
 	if (v < 2) v = 2;
-	if (v > 32) v = 32;
+	if (v > 16) v = 16;
 	return static_cast<int>(v);
 }
 
